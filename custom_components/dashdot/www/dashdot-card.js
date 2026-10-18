@@ -90,22 +90,27 @@ const toColor = (value, name) => {
   const str = String(value).trim().replace(/^#/, '');
   if (COLOR_RE.test(str)) return `#${str}`;
   // YAML turns unquoted 000000 into the number 0
-  const hint = typeof value === 'number' ? `, put it in quotes: ${name}: "${value}"` : '';
+  const hint = typeof value === 'number' ? `. Put the hex value in quotes, e.g. ${name}: "000000"` : '';
   throw new Error(`${name} must be a hex color like ff526f (got "${value}")${hint}`);
 };
 
 const toBool = (value) => value === true || value === 'true';
 
 /** Merge `query` (an iframe query string or URL) into the config and resolve aliases */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 const normalizeConfig = (raw) => {
   const config = {};
+  const put = (k, v) => {
+    if (!UNSAFE_KEYS.has(k)) config[ALIASES[k] ?? k] = v;
+  };
   if (raw.query) {
     let query = String(raw.query);
     if (query.includes('?')) query = query.slice(query.indexOf('?') + 1);
-    for (const [k, v] of new URLSearchParams(query)) config[ALIASES[k] ?? k] = v;
+    for (const [k, v] of new URLSearchParams(query)) put(k, v);
   }
   for (const [k, v] of Object.entries(raw)) {
-    if (k !== 'query') config[ALIASES[k] ?? k] = v;
+    if (k !== 'query') put(k, v);
   }
   return config;
 };
@@ -1088,24 +1093,26 @@ class DashdotCard extends HTMLElement {
     if (config.theme && !['auto', 'light', 'dark'].includes(config.theme)) {
       throw new Error('theme must be auto, light or dark');
     }
+    // validate everything before touching any state
     const graph = this.parseGraph(config);
     const color = toColor(config.color, 'color');
     const surface = toColor(config.surface, 'surface');
-
-    const instanceChanged = this.config && this.config.instance !== config.instance;
-    this.config = config;
-    this.graph = graph;
-    this.overrides = { color, surface };
-    this.chartStyle = graph
+    const chartStyle = graph
       ? {
           radius: toSize(config.innerRadius, 'innerRadius') ?? '10px',
           textSize: toSize(config.textSize, 'textSize') ?? '16px',
           textOffset: toSize(config.textOffset, 'textOffset') ?? '24px',
         }
       : {};
+    const height = graph ? toSize(config.height, 'height') : undefined;
+
+    const instanceChanged = this.config && this.config.instance !== config.instance;
+    this.config = config;
+    this.graph = graph;
+    this.overrides = { color, surface };
+    this.chartStyle = chartStyle;
     this.toggleAttribute('graph', !!graph);
     if (graph) {
-      const height = toSize(config.height, 'height');
       this.style.setProperty('--dd-graph-height', height ?? '100%');
       this.style.setProperty('--dd-graph-min-height', height ? '0' : '120px');
     } else {
@@ -1133,7 +1140,7 @@ class DashdotCard extends HTMLElement {
       type,
       filter,
       multiView: toBool(config.multiView),
-      showPercentage: toBool(config.showPercentage),
+      showPercentage: toBool(config.showPercentage ?? config.show_percentages),
       gap: toSize(config.gap, 'gap') ?? '12px',
     };
   }
@@ -1437,7 +1444,7 @@ class DashdotCardEditor extends HTMLElement {
 
     const instance = this.select('instance', [
       ['', 'First configured'],
-      ...(this.instances ?? []).map((i) => [i.title, i.title]),
+      ...(this.instances ?? []).map((i) => [this.config.instance === i.entry_id ? i.entry_id : i.title, i.title]),
     ]);
 
     const graph = this.config.graph ? String(this.config.graph).toLowerCase() : '';
@@ -1445,11 +1452,12 @@ class DashdotCardEditor extends HTMLElement {
       'select',
       {
         onchange: (e) => {
+          // height means different things in the two modes, reset it too
           if (e.target.value === 'graph') {
-            delete this.config.widgets;
+            for (const k of ['widgets', 'show_percentages', 'multi_core', 'height']) delete this.config[k];
             this.config.graph = 'cpu';
           } else {
-            for (const k of ['graph', 'multiView', 'filter', 'showPercentage', 'innerRadius', 'gap', 'textSize', 'textOffset', 'query']) delete this.config[k];
+            for (const k of ['graph', 'multiView', 'filter', 'showPercentage', 'color', 'surface', 'innerRadius', 'gap', 'textSize', 'textOffset', 'height']) delete this.config[k];
           }
           this.emit();
         },
@@ -1467,7 +1475,24 @@ class DashdotCardEditor extends HTMLElement {
     const rows = [row('Instance', instance), row('Mode', mode)];
 
     if (graph) {
-      rows.push(row('Graph', this.select('graph', GRAPHS.map((g) => [g, g]))));
+      const graphSelect = h(
+        'select',
+        {
+          onchange: (e) => {
+            const next = e.target.value;
+            this.config.graph = next;
+            if (!(GRAPH_FILTERS[next] ?? []).includes(this.config.filter)) delete this.config.filter;
+            if (next !== 'cpu' && next !== 'storage') delete this.config.multiView;
+            this.emit();
+          },
+        },
+        GRAPHS.map((g) => {
+          const o = h('option', { value: g, text: g });
+          o.selected = graph === g;
+          return o;
+        }),
+      );
+      rows.push(row('Graph', graphSelect));
       if (graph === 'cpu' || graph === 'storage') rows.push(row(graph === 'cpu' ? 'All cores' : 'Per drive', this.checkbox('multiView')));
       if (GRAPH_FILTERS[graph]) {
         rows.push(row('Filter', this.select('filter', [['', 'Show all'], ...GRAPH_FILTERS[graph].map((f) => [f, f])])));
