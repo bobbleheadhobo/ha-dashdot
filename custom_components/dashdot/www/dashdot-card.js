@@ -11,9 +11,28 @@
  *   show_percentages: true        # optional, default: like dashdot (narrow only)
  *   theme: auto                   # optional, auto | light | dark
  *   height: 360                   # optional, widget height in px
+ *
+ * Single graph, like dashdot's iframe widgets (same option names):
+ *
+ *   type: custom:dashdot-card
+ *   graph: cpu                    # cpu | ram | gpu | network | storage
+ *   multiView: true               # cpu cores / storage drives
+ *   filter: load                  # gpu: load | memory, network: up | down
+ *   showPercentage: true
+ *   color: ff526f                 # graph color (hex, # optional)
+ *   surface: 000000               # graph background (hex)
+ *   innerRadius: 10px
+ *   gap: 12px
+ *   textSize: 16px
+ *   textOffset: 24px
+ *   height: 150px                 # optional, fills the grid cell otherwise
+ *
+ * or paste the query string of an existing dashdot iframe:
+ *
+ *   query: graph=cpu&multiView=true&gap=1
  */
 
-const CARD_VERSION = '1.0.0';
+const CARD_VERSION = '1.1.0';
 
 const PALETTES = {
   light: {
@@ -42,6 +61,54 @@ const PALETTES = {
 
 const NARROW_WIDTH = 600;
 const KNOWN_WIDGETS = ['os', 'cpu', 'ram', 'gpu', 'network', 'storage'];
+const GRAPHS = ['cpu', 'ram', 'gpu', 'network', 'storage'];
+const GRAPH_FILTERS = { gpu: ['load', 'memory'], network: ['up', 'down'] };
+
+// snake_case spellings of dashdot's iframe query parameters
+const ALIASES = {
+  multi_view: 'multiView',
+  show_percentage: 'showPercentage',
+  inner_radius: 'innerRadius',
+  text_size: 'textSize',
+  text_offset: 'textOffset',
+};
+
+// Same validation as dashdot's query-params.ts
+const SIZE_RE = /^\d+(\.\d+)?(px|rem|em|%|vh|vw|ch|ex)$/i;
+const COLOR_RE = /^([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
+const toSize = (value, name) => {
+  if (value == null || value === '') return undefined;
+  const str = String(value).trim();
+  if (/^\d+(\.\d+)?$/.test(str)) return `${str}px`;
+  if (SIZE_RE.test(str)) return str;
+  throw new Error(`${name} must be a size like 12, 12px or 1em (got "${str}")`);
+};
+
+const toColor = (value, name) => {
+  if (value == null || value === '') return undefined;
+  const str = String(value).trim().replace(/^#/, '');
+  if (COLOR_RE.test(str)) return `#${str}`;
+  // YAML turns unquoted 000000 into the number 0
+  const hint = typeof value === 'number' ? `, put it in quotes: ${name}: "${value}"` : '';
+  throw new Error(`${name} must be a hex color like ff526f (got "${value}")${hint}`);
+};
+
+const toBool = (value) => value === true || value === 'true';
+
+/** Merge `query` (an iframe query string or URL) into the config and resolve aliases */
+const normalizeConfig = (raw) => {
+  const config = {};
+  if (raw.query) {
+    let query = String(raw.query);
+    if (query.includes('?')) query = query.slice(query.indexOf('?') + 1);
+    for (const [k, v] of new URLSearchParams(query)) config[ALIASES[k] ?? k] = v;
+  }
+  for (const [k, v] of Object.entries(raw)) {
+    if (k !== 'query') config[ALIASES[k] ?? k] = v;
+  }
+  return config;
+};
 
 // ---------------------------------------------------------------------------
 // Formatting (ported from apps/view/src/utils/calculations.ts)
@@ -171,7 +238,7 @@ const monotonePath = (pts) => {
 let chartIds = 0;
 
 class AreaChart {
-  constructor({ color, format, edges, small }) {
+  constructor({ color, format, edges, small, radius, textSize, textOffset }) {
     this.format = format;
     this.values = [];
     this.domain = [-5, 105];
@@ -198,8 +265,18 @@ class AreaChart {
       this.line,
     ]);
 
-    this.statLeft = h('p', { class: `stat left${small ? ' small' : ''}` });
-    this.statRight = h('p', { class: `stat right${small ? ' small' : ''}` });
+    const statStyle = (side) => {
+      const style = {};
+      if (textOffset) {
+        style.marginTop = textOffset;
+        style[side === 'left' ? 'marginLeft' : 'marginRight'] = textOffset;
+      }
+      // dashdot always draws secondary GPU engine labels at 0.8em
+      if (textSize && !small) style.fontSize = textSize;
+      return style;
+    };
+    this.statLeft = h('p', { class: `stat left${small ? ' small' : ''}`, style: statStyle('left') });
+    this.statRight = h('p', { class: `stat right${small ? ' small' : ''}`, style: statStyle('right') });
     this.loader = h('div', { class: 'loader' }, [h('span'), h('span'), h('span')]);
     this.dot = h('div', { class: 'dot', style: { background: color } });
     this.tip = h('div', { class: 'tip' });
@@ -209,7 +286,7 @@ class AreaChart {
       'div',
       {
         class: 'chart',
-        style: { borderRadius: `${tl} ${tr} ${br} ${bl}` },
+        style: { borderRadius: radius ?? `${tl} ${tr} ${br} ${bl}` },
         onpointermove: (e) => {
           const rect = this.el.getBoundingClientRect();
           this.hoverX = (e.clientX - rect.left) / rect.width;
@@ -293,6 +370,38 @@ class BarChart {
   }
 }
 
+// Used / free ring (DefaultPieChart) for total storage
+class DonutChart {
+  constructor({ color, radius, textSize, textOffset }) {
+    const ring = (attrs) =>
+      s('circle', { cx: '50', cy: '50', r: '34', fill: 'none', 'stroke-width': '14', ...attrs });
+    this.free = ring({ stroke: 'var(--dd-text)', 'stroke-opacity': '0.2' });
+    this.used = ring({ stroke: color, 'stroke-linecap': 'round', transform: 'rotate(-90 50 50)' });
+    const statStyle = {};
+    if (textOffset) Object.assign(statStyle, { marginTop: textOffset, marginLeft: textOffset });
+    if (textSize) statStyle.fontSize = textSize;
+    this.stat = h('p', { class: 'stat left', style: statStyle });
+    this.loader = h('div', { class: 'loader' }, [h('span'), h('span'), h('span')]);
+    this.svg = s('svg', { viewBox: '0 0 100 100', class: 'donut' }, [this.free, this.used]);
+    this.el = h('div', { class: 'chart', style: { borderRadius: radius ?? '25px' } }, [
+      this.stat,
+      this.loader,
+      h('div', { class: 'clip' }, [this.svg]),
+    ]);
+  }
+
+  set(used, size, label) {
+    const loaded = size > 0 && used != null;
+    this.el.classList.toggle('loading', !loaded);
+    if (!loaded) return;
+    const circumference = 2 * Math.PI * 34;
+    const fraction = Math.min(1, Math.max(0, used / size));
+    this.used.setAttribute('stroke-dasharray', `${fraction * circumference} ${circumference}`);
+    this.el.title = `${(fraction * 100).toFixed(1)} % Used\n${bytePrettyPrint(used)} / ${bytePrettyPrint(size)}`;
+    this.stat.textContent = label ?? '';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Widgets
 
@@ -324,6 +433,11 @@ class HardwareWidget {
     this.table = h('div');
     this.extra = h('div', { class: 'extra' });
     this.grid = h('div', { class: 'grid' });
+    if (card.graph) {
+      // iframe style: just the graph(s), no info / icon / heading
+      this.el = h('div', { class: 'graph' }, [this.grid]);
+      return;
+    }
     this.el = card.pane(key, [
       h('div', { class: 'hw' }, [
         h('div', { class: 'icon', style: { background: color } }, [icon(iconName)]),
@@ -351,8 +465,13 @@ class HardwareWidget {
     return this.config.override ?? {};
   }
 
+  get graph() {
+    return this.card.graph;
+  }
+
   // dashdot shows the % labels on mobile, or everywhere if always_show_percentages
   get showPercentages() {
+    if (this.graph) return this.graph.showPercentage;
     const forced = this.card.config.show_percentages;
     if (forced != null) return !!forced;
     return !!this.config.always_show_percentages || this.el.classList.contains('narrow');
@@ -379,12 +498,17 @@ class HardwareWidget {
     this.pageArgs[2]?.();
   }
 
+  /** An area chart styled for the current mode */
+  chart(opts) {
+    return new AreaChart({ ...opts, ...this.card.chartStyle });
+  }
+
   setGrid(charts, { columns = 1, template, rows, gap = 20 } = {}) {
     this.charts = charts;
     Object.assign(this.grid.style, {
       gridTemplateColumns: template ?? `repeat(${columns}, minmax(0, 1fr))`,
       gridTemplateRows: rows ? `repeat(${rows}, minmax(0, 1fr))` : '',
-      gap: `${gap}px`,
+      gap: this.graph ? this.graph.gap : `${gap}px`,
     });
     this.grid.replaceChildren(...charts.map((c) => c.el));
   }
@@ -421,6 +545,7 @@ class CpuWidget extends HardwareWidget {
   }
 
   get multiView() {
+    if (this.graph) return this.graph.multiView;
     const mode = this.config.cpu_cores_toggle_mode;
     if (mode === 'multi-core') return true;
     if (mode === 'average') return false;
@@ -429,7 +554,7 @@ class CpuWidget extends HardwareWidget {
 
   buildCharts(cores) {
     const multi = this.multiView;
-    if (this.config.cpu_cores_toggle_mode === 'toggle' || !this.config.cpu_cores_toggle_mode) {
+    if (!this.graph && (this.config.cpu_cores_toggle_mode === 'toggle' || !this.config.cpu_cores_toggle_mode)) {
       this.toggle('Show All Cores', multi, (v) => {
         this.card.setSetting('multiCore', v);
         this.multi = null;
@@ -442,7 +567,7 @@ class CpuWidget extends HardwareWidget {
       const columns = getColumnsForCores(cores);
       this.setGrid(
         Array.from({ length: cores }, (_, i) =>
-          new AreaChart({
+          this.chart({
             color,
             format,
             edges: [i === 0, i === columns - 1, i === cores - 1, i === cores - columns],
@@ -451,7 +576,7 @@ class CpuWidget extends HardwareWidget {
         { columns, gap: 8 },
       );
     } else {
-      this.setGrid([new AreaChart({ color, format })]);
+      this.setGrid([this.chart({ color, format })]);
     }
     this.multi = multi;
     this.cores = cores;
@@ -503,7 +628,7 @@ class RamWidget extends HardwareWidget {
       }),
       7,
     );
-    this.setGrid([new AreaChart({ color: card.colors.ram, format: (v) => `${fixed(v)} %` })]);
+    this.setGrid([this.chart({ color: card.colors.ram, format: (v) => `${fixed(v)} %` })]);
   }
 
   update() {
@@ -545,7 +670,8 @@ class GpuWidget extends HardwareWidget {
     const names = engines ? Object.keys(engines) : [];
     const color = this.card.colors.gpu;
     const format = (v) => `${fixed(v)} %`;
-    const key = `${idx}:${names.join(',')}`;
+    const filter = this.graph?.filter;
+    const key = `${idx}:${names.join(',')}:${filter ?? ''}`;
 
     if (names.length) {
       const featured = names.length === 5 ? (names.includes('Video') ? 'Video' : names[0]) : null;
@@ -553,12 +679,17 @@ class GpuWidget extends HardwareWidget {
       if (this.engineKey !== key) {
         const charts = sorted.map((name, i) => {
           const isFeatured = i === 0 && featured !== null;
-          const c = new AreaChart({ color, format, small: !isFeatured });
+          const c = this.chart({ color, format, small: !isFeatured });
           if (isFeatured) c.el.style.gridRow = 'span 2';
           c.name = name;
           return c;
         });
-        this.setGrid(charts, ENGINE_GRID_LAYOUTS[sorted.length] ?? { columns: sorted.length });
+        if (filter) {
+          // dashdot shows only the primary engine when filtered
+          this.setGrid([charts[0]], { columns: 1 });
+        } else {
+          this.setGrid(charts, ENGINE_GRID_LAYOUTS[sorted.length] ?? { columns: sorted.length });
+        }
         this.engineKey = key;
       }
       for (const chart of this.charts) {
@@ -570,16 +701,18 @@ class GpuWidget extends HardwareWidget {
     }
 
     if (this.engineKey !== key) {
-      this.setGrid([new AreaChart({ color, format }), new AreaChart({ color, format })], { columns: 2 });
+      this.loadChart = filter === 'memory' ? null : this.chart({ color, format });
+      this.memChart = filter === 'load' ? null : this.chart({ color, format });
+      const charts = [this.loadChart, this.memChart].filter((c) => c);
+      this.setGrid(charts, { columns: charts.length });
       this.engineKey = key;
     }
-    const [loadChart, memChart] = this.charts;
     const loads = load.map((l) => l.layout?.[idx]?.load ?? 0);
     const mems = load.map((l) => l.layout?.[idx]?.memory ?? 0);
-    loadChart.set(loads);
-    loadChart.setTexts(this.showPercentages ? `%: ${fixed(loads.at(-1))} (Load)` : '');
-    memChart.set(mems);
-    memChart.setTexts(`%: ${fixed(mems.at(-1))} (Memory)`);
+    this.loadChart?.set(loads);
+    this.loadChart?.setTexts(this.showPercentages ? `%: ${fixed(loads.at(-1))} (Load)` : '');
+    this.memChart?.set(mems);
+    this.memChart?.setTexts(`%: ${fixed(mems.at(-1))} (Memory)`);
   }
 }
 
@@ -603,23 +736,21 @@ class NetworkWidget extends HardwareWidget {
       7,
     );
     const format = (v) => bpsPrettyPrint((v ?? 0) * 8, asBytes);
-    this.setGrid(
-      [
-        new AreaChart({ color: card.colors.network, format }),
-        new AreaChart({ color: card.colors.network, format }),
-      ],
-      { columns: 2 },
-    );
+    const filter = this.graph?.filter;
+    this.upChart = filter === 'down' ? null : this.chart({ color: card.colors.network, format });
+    this.downChart = filter === 'up' ? null : this.chart({ color: card.colors.network, format });
+    const charts = [this.upChart, this.downChart].filter((c) => c);
+    this.setGrid(charts, { columns: charts.length });
   }
 
   update() {
     const load = this.card.dd.history.network ?? [];
     const asBytes = this.config.network_speed_as_bytes;
-    const [upChart, downChart] = this.charts;
     for (const [chart, key, speed, arrow] of [
-      [upChart, 'up', this.speedUp, '↑'],
-      [downChart, 'down', this.speedDown, '↓'],
+      [this.upChart, 'up', this.speedUp, '↑'],
+      [this.downChart, 'down', this.speedDown, '↓'],
     ]) {
+      if (!chart) continue;
       const values = load.map((l) => l[key] ?? 0);
       const max = Math.max((speed ?? 0) / 8, ...values) || 1;
       chart.set(values, [max * -0.1, max * 1.1]);
@@ -657,14 +788,32 @@ class StorageWidget extends HardwareWidget {
         .join('\n=> '),
     }));
     this.renderInfos(infos, this.config.storage_widget_items_per_page ?? 3, () => this.update());
-    this.bars = new BarChart(card.colors.storage);
-    this.setGrid([this.bars]);
+    if (this.graph && !this.graph.multiView) {
+      this.donut = new DonutChart({ color: card.colors.storage, ...card.chartStyle });
+      this.setGrid([this.donut]);
+    } else {
+      this.bars = new BarChart(card.colors.storage);
+      if (card.chartStyle.radius) this.bars.el.style.borderRadius = card.chartStyle.radius;
+      this.setGrid([this.bars]);
+    }
   }
 
   update() {
     const loads = this.card.dd.storage ?? [];
-    const perPage = this.config.storage_widget_items_per_page ?? 3;
-    const start = this.page * perPage;
+    if (this.donut) {
+      // totals exclude virtual mounts, -1 means no mount was found
+      let size = 0;
+      let used = 0;
+      this.entries.forEach((e, i) => {
+        if (e.virtual || loads[i] === -1) return;
+        size += e.size ?? 0;
+        used += Math.max(0, loads[i] ?? 0);
+      });
+      this.donut.set(loads.length ? used : null, size, this.showPercentages && size ? `%: ${((used / size) * 100).toFixed(1)}` : '');
+      return;
+    }
+    const perPage = this.graph ? this.entries.length : (this.config.storage_widget_items_per_page ?? 3);
+    const start = this.graph ? 0 : this.page * perPage;
     this.bars.el.classList.toggle('loading', !loads.length);
     this.bars.set(
       this.entries.slice(start, start + perPage).map((e, i) => {
@@ -864,6 +1013,21 @@ p { margin: 0; }
 .bar-fill { height: 100%; border-radius: 10px; }
 .bar-label { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-size: 0.85rem; white-space: nowrap; }
 
+/* Single graph (dashdot iframe widgets) */
+:host([graph]) { padding: 0; height: 100%; }
+:host([graph]) .root { height: 100%; }
+ha-card.graph-card {
+  position: relative; display: block; box-sizing: border-box; overflow: hidden;
+  height: var(--dd-graph-height, 100%); min-height: var(--dd-graph-min-height, 120px);
+  color: var(--dd-text);
+}
+.graph-card.offline > * { opacity: 0.5; }
+.graph-card > .graph, .graph-card > .message { position: absolute; inset: 0; }
+.graph-card .grid { position: relative; height: 100%; width: 100%; bottom: auto; right: auto; }
+.graph-card .chart { box-shadow: none; }
+.graph-card .message { border: none; border-radius: 0; background: none; display: flex; align-items: center; justify-content: center; text-align: center; }
+.donut { width: 100%; height: 100%; }
+
 /* ServerWidget */
 .os { position: relative; flex: 1; max-width: 100%; display: flex; flex-direction: column; padding: 25px; overflow: hidden; border-radius: 25px; }
 .os-heading {
@@ -897,7 +1061,7 @@ class DashdotCard extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = STYLE;
-    this.root = h('div');
+    this.root = h('div', { class: 'root' });
     this.shadowRoot.append(style, this.root);
     this.dd = null;
     this.widgets = [];
@@ -914,7 +1078,8 @@ class DashdotCard extends HTMLElement {
     });
   }
 
-  setConfig(config) {
+  setConfig(rawConfig) {
+    const config = normalizeConfig(rawConfig ?? {});
     if (config.widgets && !Array.isArray(config.widgets)) {
       throw new Error('widgets must be a list, e.g. [os, cpu, ram, gpu]');
     }
@@ -923,12 +1088,54 @@ class DashdotCard extends HTMLElement {
     if (config.theme && !['auto', 'light', 'dark'].includes(config.theme)) {
       throw new Error('theme must be auto, light or dark');
     }
+    const graph = this.parseGraph(config);
+    const color = toColor(config.color, 'color');
+    const surface = toColor(config.surface, 'surface');
+
     const instanceChanged = this.config && this.config.instance !== config.instance;
     this.config = config;
-    this.style.setProperty('--dd-height', `${Number(config.height) || 360}px`);
+    this.graph = graph;
+    this.overrides = { color, surface };
+    this.chartStyle = graph
+      ? {
+          radius: toSize(config.innerRadius, 'innerRadius') ?? '10px',
+          textSize: toSize(config.textSize, 'textSize') ?? '16px',
+          textOffset: toSize(config.textOffset, 'textOffset') ?? '24px',
+        }
+      : {};
+    this.toggleAttribute('graph', !!graph);
+    if (graph) {
+      const height = toSize(config.height, 'height');
+      this.style.setProperty('--dd-graph-height', height ?? '100%');
+      this.style.setProperty('--dd-graph-min-height', height ? '0' : '120px');
+    } else {
+      this.style.setProperty('--dd-height', `${Number(config.height) || 360}px`);
+    }
     if (instanceChanged) this.resubscribe();
     else this.subscribe();
     this.rebuild();
+  }
+
+  parseGraph(config) {
+    if (config.graph == null || config.graph === '') return null;
+    const type = String(config.graph).toLowerCase();
+    if (!GRAPHS.includes(type)) throw new Error(`graph must be one of ${GRAPHS.join(', ')}`);
+    if (config.widgets) throw new Error('Use either graph (single graph) or widgets, not both');
+    const filter = config.filter ? String(config.filter).toLowerCase() : undefined;
+    if (filter && !(GRAPH_FILTERS[type] ?? []).includes(filter)) {
+      throw new Error(
+        GRAPH_FILTERS[type]
+          ? `filter for ${type} must be ${GRAPH_FILTERS[type].join(' or ')}`
+          : `filter is only supported for ${Object.keys(GRAPH_FILTERS).join(' and ')}`,
+      );
+    }
+    return {
+      type,
+      filter,
+      multiView: toBool(config.multiView),
+      showPercentage: toBool(config.showPercentage),
+      gap: toSize(config.gap, 'gap') ?? '12px',
+    };
   }
 
   set hass(hass) {
@@ -953,10 +1160,12 @@ class DashdotCard extends HTMLElement {
   }
 
   getCardSize() {
+    if (this.graph) return 3;
     return Math.max(1, this.widgetKeys().length) * 8;
   }
 
   getGridOptions() {
+    if (this.graph) return { columns: 6, rows: 3, min_columns: 2, min_rows: 1 };
     return { columns: 'full', min_columns: 6, rows: 'auto' };
   }
 
@@ -1040,7 +1249,7 @@ class DashdotCard extends HTMLElement {
     }
     if (m.available !== undefined) {
       this.dd.available = m.available;
-      this.root.querySelectorAll('.pane').forEach((p) => p.classList.toggle('offline', !m.available));
+      this.root.querySelectorAll('.pane, .graph-card').forEach((p) => p.classList.toggle('offline', !m.available));
     }
     if (m.storage) this.dd.storage = m.storage;
     if (m.samples) {
@@ -1061,7 +1270,13 @@ class DashdotCard extends HTMLElement {
   get colors() {
     const theme = this.config?.theme ?? 'auto';
     const dark = theme === 'auto' ? this.dark : theme === 'dark';
-    return PALETTES[dark ? 'dark' : 'light'];
+    const colors = { ...PALETTES[dark ? 'dark' : 'light'] };
+    const { color, surface } = this.overrides ?? {};
+    if (color) {
+      for (const key of ['primary', 'cpu', 'ram', 'storage', 'network', 'gpu']) colors[key] = color;
+    }
+    if (surface) colors.surface = surface;
+    return colors;
   }
 
   widgetKeys() {
@@ -1094,6 +1309,11 @@ class DashdotCard extends HTMLElement {
       return;
     }
 
+    if (this.graph) {
+      this.rebuildGraph();
+      return;
+    }
+
     const missing = (this.config.widgets ?? []).filter((w) => !this.dd.static.config.widget_list?.includes(w));
     for (const key of this.widgetKeys()) {
       if (missing.includes(key)) continue;
@@ -1118,6 +1338,27 @@ class DashdotCard extends HTMLElement {
     this.updateWidgets();
   }
 
+  rebuildGraph() {
+    const { type } = this.graph;
+    const card = document.createElement('ha-card');
+    card.className = 'graph-card';
+    if (!this.dd.available) card.classList.add('offline');
+
+    if (!this.dd.static.config.widget_list?.includes(type)) {
+      card.append(h('div', { class: 'message', text: `${type} is not enabled in dashdot (DASHDOT_WIDGET_LIST)` }));
+    } else {
+      try {
+        const widget = new WIDGETS[type](this);
+        this.widgets.push(widget);
+        card.append(widget.el);
+      } catch (err) {
+        console.error(`dashdot-card: failed to build ${type} graph`, err);
+      }
+    }
+    this.root.replaceChildren(card);
+    this.updateWidgets();
+  }
+
   updateWidgets() {
     for (const w of this.widgets) {
       try {
@@ -1134,7 +1375,8 @@ class DashdotCard extends HTMLElement {
 
 class DashdotCardEditor extends HTMLElement {
   setConfig(config) {
-    this.config = { ...config };
+    // expands a pasted iframe `query` into individual fields on the next edit
+    this.config = normalizeConfig(config ?? {});
     this.render();
   }
 
@@ -1156,67 +1398,120 @@ class DashdotCardEditor extends HTMLElement {
     this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this.config }, bubbles: true, composed: true }));
   }
 
+  set(key, value) {
+    if (value === '' || value == null || value === false) delete this.config[key];
+    else this.config[key] = value;
+    this.emit();
+  }
+
+  select(key, options, fallback = '') {
+    return h(
+      'select',
+      { onchange: (e) => this.set(key, e.target.value) },
+      options.map(([value, label]) => {
+        const o = h('option', { value, text: label });
+        if (String(this.config[key] ?? fallback) === value) o.selected = true;
+        return o;
+      }),
+    );
+  }
+
+  checkbox(key) {
+    const box = h('input', { type: 'checkbox', onchange: (e) => this.set(key, e.target.checked) });
+    box.checked = toBool(this.config[key]);
+    return box;
+  }
+
+  // 'change' (not 'input') so re-rendering doesn't steal focus while typing
+  text(key, placeholder) {
+    const input = h('input', { type: 'text', placeholder, onchange: (e) => this.set(key, e.target.value.trim()) });
+    input.value = this.config[key] ?? '';
+    return input;
+  }
+
   render() {
     if (!this.config) return;
-    const selected = this.config.widgets ?? [];
     const row = (label, control) =>
       h('label', { style: { display: 'flex', gap: '12px', alignItems: 'center', margin: '8px 0' } }, [h('span', { text: label, style: { minWidth: '140px' } }), control]);
+    const hint = (text) => h('div', { text, style: { opacity: 0.7, fontSize: '0.85em' } });
 
-    const instance = h(
+    const instance = this.select('instance', [
+      ['', 'First configured'],
+      ...(this.instances ?? []).map((i) => [i.title, i.title]),
+    ]);
+
+    const graph = this.config.graph ? String(this.config.graph).toLowerCase() : '';
+    const mode = h(
       'select',
       {
         onchange: (e) => {
-          if (e.target.value) this.config.instance = e.target.value;
-          else delete this.config.instance;
+          if (e.target.value === 'graph') {
+            delete this.config.widgets;
+            this.config.graph = 'cpu';
+          } else {
+            for (const k of ['graph', 'multiView', 'filter', 'showPercentage', 'innerRadius', 'gap', 'textSize', 'textOffset', 'query']) delete this.config[k];
+          }
           this.emit();
         },
       },
       [
-        h('option', { value: '', text: 'First configured' }),
-        ...(this.instances ?? []).map((i) => {
-          const o = h('option', { value: i.title, text: i.title });
-          if (this.config.instance === i.title || this.config.instance === i.entry_id) o.selected = true;
-          return o;
-        }),
-      ],
-    );
-
-    const checks = h(
-      'div',
-      { style: { display: 'flex', flexWrap: 'wrap', gap: '12px' } },
-      KNOWN_WIDGETS.map((w) => {
-        const box = h('input', {
-          type: 'checkbox',
-          onchange: (e) => {
-            const set = new Set(this.config.widgets ?? []);
-            e.target.checked ? set.add(w) : set.delete(w);
-            const list = KNOWN_WIDGETS.filter((k) => set.has(k));
-            if (list.length) this.config.widgets = list;
-            else delete this.config.widgets;
-            this.emit();
-          },
-        });
-        box.checked = selected.includes(w);
-        return h('label', {}, [box, ` ${w}`]);
-      }),
-    );
-
-    const theme = h(
-      'select',
-      { onchange: (e) => { this.config.theme = e.target.value; this.emit(); } },
-      ['auto', 'light', 'dark'].map((t) => {
-        const o = h('option', { value: t, text: t });
-        if ((this.config.theme ?? 'auto') === t) o.selected = true;
+        ['widgets', 'Full widgets (like the dashdot page)'],
+        ['graph', 'Single graph (like a dashdot iframe)'],
+      ].map(([value, label]) => {
+        const o = h('option', { value, text: label });
+        o.selected = (graph ? 'graph' : 'widgets') === value;
         return o;
       }),
     );
 
-    this.replaceChildren(
-      row('Instance', instance),
-      row('Widgets', checks),
-      h('div', { text: 'No widgets ticked = use DASHDOT_WIDGET_LIST', style: { opacity: 0.7, fontSize: '0.85em' } }),
-      row('Theme', theme),
-    );
+    const rows = [row('Instance', instance), row('Mode', mode)];
+
+    if (graph) {
+      rows.push(row('Graph', this.select('graph', GRAPHS.map((g) => [g, g]))));
+      if (graph === 'cpu' || graph === 'storage') rows.push(row(graph === 'cpu' ? 'All cores' : 'Per drive', this.checkbox('multiView')));
+      if (GRAPH_FILTERS[graph]) {
+        rows.push(row('Filter', this.select('filter', [['', 'Show all'], ...GRAPH_FILTERS[graph].map((f) => [f, f])])));
+      }
+      rows.push(
+        row('Show percentage', this.checkbox('showPercentage')),
+        row('Theme', this.select('theme', [['auto', 'auto'], ['light', 'light'], ['dark', 'dark']], 'auto')),
+        row('Color', this.text('color', 'widget default, e.g. ff526f')),
+        row('Surface', this.text('surface', 'theme default, e.g. 000000')),
+        row('Inner radius', this.text('innerRadius', '10px')),
+        row('Gap', this.text('gap', '12px')),
+        row('Text size', this.text('textSize', '16px')),
+        row('Text offset', this.text('textOffset', '24px')),
+        row('Height', this.text('height', 'fill grid cell, e.g. 150px')),
+      );
+    } else {
+      const selected = this.config.widgets ?? [];
+      const checks = h(
+        'div',
+        { style: { display: 'flex', flexWrap: 'wrap', gap: '12px' } },
+        KNOWN_WIDGETS.map((w) => {
+          const box = h('input', {
+            type: 'checkbox',
+            onchange: (e) => {
+              const set = new Set(this.config.widgets ?? []);
+              e.target.checked ? set.add(w) : set.delete(w);
+              const list = KNOWN_WIDGETS.filter((k) => set.has(k));
+              if (list.length) this.config.widgets = list;
+              else delete this.config.widgets;
+              this.emit();
+            },
+          });
+          box.checked = selected.includes(w);
+          return h('label', {}, [box, ` ${w}`]);
+        }),
+      );
+      rows.push(
+        row('Widgets', checks),
+        hint('No widgets ticked = use DASHDOT_WIDGET_LIST'),
+        row('Theme', this.select('theme', [['auto', 'auto'], ['light', 'light'], ['dark', 'dark']], 'auto')),
+      );
+    }
+
+    this.replaceChildren(...rows);
   }
 }
 

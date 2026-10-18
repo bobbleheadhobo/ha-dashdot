@@ -63,10 +63,73 @@ Your dashdot settings (overrides, label lists, `*_shown_datapoints`,
 `*_widget_grow`, `cpu_cores_toggle_mode`, `use_imperial`, ...) are read from
 dashdot and applied just like on the dashdot page.
 
+These options are for the full widgets. For single graphs see below.
+
 Several widgets in one card lay out like dashdot does (flex-wrap using the
 `*_widget_grow` / `*_widget_min_width` settings). A panel view gives the
 closest look to the real page. You can also use one card per widget, e.g.
 `widgets: [cpu]`.
+
+## Single graphs (iframe replacement)
+
+Set `graph` to get just the graph, exactly like a dashdot iframe widget
+(`https://<dashdot>/?graph=cpu&...`). The options use the same names as
+dashdot's query parameters:
+
+| Option           | Values                                       | Default         |
+| ---------------- | -------------------------------------------- | --------------- |
+| `graph`          | `cpu`, `ram`, `gpu`, `network`, `storage`    | required        |
+| `multiView`      | `true` = every CPU core / every drive        | `false`         |
+| `filter`         | gpu: `load` / `memory`, network: `up` / `down` | show all      |
+| `showPercentage` | `true` / `false`                             | `false`         |
+| `theme`          | `auto`, `light`, `dark`                      | `auto`          |
+| `color`          | hex graph color, `#` optional (`ff526f`)     | widget color    |
+| `surface`        | hex background color (`000000`)              | theme surface   |
+| `innerRadius`    | corner radius of the graphs                  | `10px`          |
+| `gap`            | space between graphs                         | `12px`          |
+| `textSize`       | size of the percentage text                  | `16px`          |
+| `textOffset`     | distance of the text from the corner         | `24px`          |
+| `height`         | card height, e.g. `150px`                    | fills grid cell |
+
+Sizes accept a plain number (pixels) or a CSS unit (`px`, `em`, `rem`, `%`,
+...). snake_case spellings (`multi_view`, `show_percentage`, `inner_radius`,
+`text_size`, `text_offset`) work too.
+
+To move an existing iframe over, paste its URL or query string into `query`:
+
+```yaml
+type: custom:dashdot-card
+query: https://dash.example.com/?graph=gpu&theme=dark&filter=load&gap=1
+```
+
+Options set next to `query` win over the ones inside it, and the visual
+editor turns a pasted `query` into separate fields when you edit the card.
+
+More examples:
+
+```yaml
+# All CPU cores, tight grid
+type: custom:dashdot-card
+graph: cpu
+multiView: true
+gap: 1
+
+# RAM with the percentage label
+type: custom:dashdot-card
+graph: ram
+showPercentage: true
+
+# Only the GPU load (Intel GPUs: the main engine), red on black
+type: custom:dashdot-card
+graph: gpu
+filter: load
+showPercentage: true
+color: ff526f
+surface: "000000"
+```
+
+In a sections view the graph fills its grid cell, so resize it there. In
+masonry views, set `height`.
 
 ## Entities
 
