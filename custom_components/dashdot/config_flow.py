@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlparse
 
 import aiohttp
 import voluptuous as vol
-
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -15,7 +13,7 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.const import CONF_URL, CONF_VERIFY_SSL
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
@@ -23,6 +21,7 @@ from .const import (
     CONF_SENSOR_INTERVAL,
     DEFAULT_LIVE_INTERVAL,
     DEFAULT_SENSOR_INTERVAL,
+    DEFAULT_TITLE,
     DOMAIN,
 )
 from .hub import REQUEST_TIMEOUT, DashdotError, async_fetch_json
@@ -40,6 +39,20 @@ async def _ui_reachable(
         return False
 
 
+def unique_title(hass: HomeAssistant, exclude: str | None = None) -> str:
+    """'dash.', or 'dash. 2', 'dash. 3', ... when there are several."""
+    taken = {
+        e.title
+        for e in hass.config_entries.async_entries(DOMAIN)
+        if e.entry_id != exclude
+    }
+    title, n = DEFAULT_TITLE, 1
+    while title in taken:
+        n += 1
+        title = f"{DEFAULT_TITLE} {n}"
+    return title
+
+
 def _connection_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
@@ -55,6 +68,8 @@ class DashdotConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for dash."""
 
     VERSION = 1
+    # 1.2: titles no longer contain the host
+    MINOR_VERSION = 2
 
     async def _async_validate(self, url: str, verify_ssl: bool) -> dict[str, str]:
         """Check dashdot answers at url. Returns form errors."""
@@ -83,9 +98,8 @@ class DashdotConfigFlow(ConfigFlow, domain=DOMAIN):
 
             errors = await self._async_validate(url, verify_ssl)
             if not errors:
-                host = urlparse(url).hostname or url
                 return self.async_create_entry(
-                    title=f"dash. {host}",
+                    title=unique_title(self.hass),
                     data={CONF_URL: url, CONF_VERIFY_SSL: verify_ssl},
                 )
 

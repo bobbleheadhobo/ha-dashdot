@@ -56,7 +56,7 @@ dashdot are needed.
 | Option             | Default                  | Description                                                                |
 | ------------------ | ------------------------ | -------------------------------------------------------------------------- |
 | `widgets`          | `DASHDOT_WIDGET_LIST`    | Any of `os`, `cpu`, `ram`, `gpu`, `network`, `storage`, in display order    |
-| `instance`         | first configured         | Config entry title (e.g. `dash. 192.168.1.10`) when you have several       |
+| `instance`         | first configured         | Config entry title (e.g. `dash. 2`) when you have several                   |
 | `show_percentages` | like dashdot             | `true`/`false`. dashdot shows them only on narrow layouts by default        |
 | `theme`            | `auto`                   | `auto` follows Home Assistant's dark mode, or force `light` / `dark`        |
 | `height`           | `360`                    | Minimum height of each widget in px                                         |

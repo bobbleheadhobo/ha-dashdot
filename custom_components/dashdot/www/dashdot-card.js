@@ -6,7 +6,7 @@
  * (authenticated) websocket, so the browser never talks to dashdot directly.
  *
  *   type: custom:dashdot-card
- *   instance: dash. 192.168.1.10   # optional, config entry title or id
+ *   instance: dash. 2             # optional, config entry title or id
  *   widgets: [os, cpu, ram, gpu]  # optional, defaults to DASHDOT_WIDGET_LIST
  *   show_percentages: true        # optional, default: like dashdot (narrow only)
  *   theme: auto                   # optional, auto | light | dark
@@ -32,7 +32,7 @@
  *   query: graph=cpu&multiView=true&gap=1
  */
 
-const CARD_VERSION = '1.3.0';
+const CARD_VERSION = '1.4.0';
 
 const PALETTES = {
   light: {

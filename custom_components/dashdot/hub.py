@@ -7,15 +7,14 @@ talk to Home Assistant (authenticated) and never to dashdot itself.
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from collections.abc import Callable
 import contextlib
 import logging
 import time
+from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 import aiohttp
-
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 

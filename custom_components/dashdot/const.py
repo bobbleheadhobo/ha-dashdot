@@ -2,6 +2,8 @@
 
 DOMAIN = "dashdot"
 
+DEFAULT_TITLE = "dash."
+
 CONF_LIVE_INTERVAL = "live_interval"
 CONF_SENSOR_INTERVAL = "sensor_interval"
 

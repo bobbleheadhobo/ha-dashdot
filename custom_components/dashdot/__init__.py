@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import voluptuous as vol
-
 from homeassistant.components import websocket_api
 from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
@@ -16,8 +17,11 @@ from homeassistant.const import CONF_URL, CONF_VERIFY_SSL, Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util import slugify
 
+from .config_flow import unique_title
 from .const import (
     CARD_URL,
     CONF_LIVE_INTERVAL,
@@ -27,6 +31,8 @@ from .const import (
     DOMAIN,
 )
 from .hub import DashdotError, DashdotHub
+
+_LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.SENSOR]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -75,6 +81,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: DashdotConfigEntry) -> b
     entry.async_on_unload(hub.async_stop)
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old entries."""
+    if entry.version > 1:
+        return False
+
+    if entry.minor_version < 2:
+        # 1.1 -> 1.2: entries used to be titled 'dash. <host>', which put the
+        # IP into every entity name and id. Drop it unless the user renamed it.
+        host = urlparse(entry.data[CONF_URL]).hostname or entry.data[CONF_URL]
+        if entry.title == f"dash. {host}":
+            new_title = unique_title(hass, exclude=entry.entry_id)
+            old_prefix = f"sensor.{slugify(entry.title)}_"
+            new_prefix = f"sensor.{slugify(new_title)}_"
+            registry = er.async_get(hass)
+            for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
+                if not ent.entity_id.startswith(old_prefix):
+                    continue  # renamed by the user, leave it
+                new_id = new_prefix + ent.entity_id.removeprefix(old_prefix)
+                if registry.async_get(new_id) is None:
+                    # the recorder moves the history along with the id
+                    registry.async_update_entity(ent.entity_id, new_entity_id=new_id)
+            _LOGGER.info("Renamed dashdot entry '%s' to '%s'", entry.title, new_title)
+            hass.config_entries.async_update_entry(entry, title=new_title)
+        hass.config_entries.async_update_entry(entry, minor_version=2)
+
     return True
 
 
