@@ -111,6 +111,10 @@ def ws_instances(
     {
         vol.Required("type"): "dashdot/subscribe",
         vol.Optional("instance"): str,
+        # Only stream (and fast-poll) these. Omitted = everything.
+        vol.Optional("widgets"): [
+            vol.In(["os", "cpu", "ram", "gpu", "network", "storage"])
+        ],
     }
 )
 @callback
@@ -141,6 +145,7 @@ def ws_subscribe(
     def forward(update: dict[str, Any]) -> None:
         connection.send_message(websocket_api.event_message(msg["id"], update))
 
-    connection.subscriptions[msg["id"]] = hub.subscribe(forward)
+    widgets = frozenset(msg["widgets"]) if "widgets" in msg else None
+    connection.subscriptions[msg["id"]] = hub.subscribe(forward, widgets)
     connection.send_result(msg["id"])
-    forward(hub.snapshot())
+    forward(hub.snapshot(widgets))

@@ -11,6 +11,17 @@
         "data_description": {
           "url": "e.g. http://192.168.1.10:3003/monitor-path"
         }
+      },
+      "reconfigure": {
+        "title": "Change dash. connection",
+        "description": "Update the URL Home Assistant uses to reach dashdot, for example after its IP address changed. Entities and their history are kept.",
+        "data": {
+          "url": "URL",
+          "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "url": "e.g. http://192.168.1.10:3003/monitor-path"
+        }
       }
     },
     "error": {
@@ -18,7 +29,8 @@
       "integrations_disabled": "dashdot answered, but its API is disabled. Remove DASHDOT_DISABLE_INTEGRATIONS from the container."
     },
     "abort": {
-      "already_configured": "This dashdot instance is already configured."
+      "already_configured": "This dashdot instance is already configured.",
+      "reconfigure_successful": "The connection was updated."
     }
   },
   "options": {
@@ -37,16 +49,36 @@
   },
   "entity": {
     "sensor": {
-      "cpu_load": { "name": "CPU load" },
-      "cpu_temperature": { "name": "CPU temperature" },
-      "ram_usage": { "name": "Memory usage" },
-      "ram_used": { "name": "Memory used" },
-      "gpu_load": { "name": "GPU {index} load" },
-      "gpu_memory": { "name": "GPU {index} memory" },
-      "network_up": { "name": "Upload" },
-      "network_down": { "name": "Download" },
-      "storage_usage": { "name": "Storage {index} usage" },
-      "last_boot": { "name": "Last boot" }
+      "cpu_load": {
+        "name": "CPU load"
+      },
+      "cpu_temperature": {
+        "name": "CPU temperature"
+      },
+      "ram_usage": {
+        "name": "Memory usage"
+      },
+      "ram_used": {
+        "name": "Memory used"
+      },
+      "gpu_load": {
+        "name": "GPU {index} load"
+      },
+      "gpu_memory": {
+        "name": "GPU {index} memory"
+      },
+      "network_up": {
+        "name": "Upload"
+      },
+      "network_down": {
+        "name": "Download"
+      },
+      "storage_usage": {
+        "name": "Storage {index} usage"
+      },
+      "last_boot": {
+        "name": "Last boot"
+      }
     }
   }
 }

@@ -62,8 +62,9 @@ async def async_fetch_json(
 class DashdotHub:
     """Polls one dashdot instance.
 
-    Polls every `live_interval` while at least one card is subscribed and
-    every `sensor_interval` otherwise, since only the cards need fast data.
+    Each /load endpoint is polled every `live_interval` while an open card
+    shows it, and every `sensor_interval` otherwise, so a card with only a
+    RAM graph doesn't make Home Assistant poll CPU and GPU every second.
     """
 
     def __init__(
@@ -95,13 +96,16 @@ class DashdotHub:
         # changes which sensors should exist
         self.on_layout_change: CALLBACK_TYPE | None = None
 
-        self._subscribers: set[Callable[[dict[str, Any]], None]] = set()
+        # listener -> widgets it shows (None = all of them)
+        self._subscribers: dict[
+            Callable[[dict[str, Any]], None], frozenset[str] | None
+        ] = {}
         self._sensor_listeners: set[CALLBACK_TYPE] = set()
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
         self._layout: tuple | None = None
         self._next_static = 0.0
-        self._last_storage = 0.0
+        self._last_fetch: dict[str, float] = {}
         self._last_sensor_write = 0.0
 
     @property
@@ -110,9 +114,12 @@ class DashdotHub:
         return self.config.get("widget_list", [])
 
     @property
-    def live(self) -> bool:
-        """Whether a card is watching, so we poll at the fast rate."""
-        return bool(self._subscribers)
+    def live_widgets(self) -> set[str]:
+        """Series widgets an open card is showing, these get the fast rate."""
+        wanted: set[str] = set()
+        for widgets in self._subscribers.values():
+            wanted |= set(SERIES_WIDGETS) if widgets is None else widgets
+        return wanted & set(SERIES_WIDGETS) & set(self.widgets)
 
     def widget_ok(self, widget: str) -> bool:
         """Whether the last fetch of this widget's data worked."""
@@ -172,6 +179,7 @@ class DashdotHub:
             self._task = None
         self._broadcast({"reload": True})
         self._subscribers.clear()
+        self._wake.set()
 
     async def _async_run(self) -> None:
         while True:
@@ -181,7 +189,7 @@ class DashdotHub:
                 await self._async_poll()
             except Exception:
                 _LOGGER.exception("Unexpected error polling dashdot")
-            interval = self.live_interval if self.live else self.sensor_interval
+            interval = self.live_interval if self.live_widgets else self.sensor_interval
             delay = max(0.0, interval - (time.monotonic() - started))
             # A card subscribing sets _wake, so it gets data right away
             with contextlib.suppress(TimeoutError):
@@ -203,10 +211,20 @@ class DashdotHub:
                 _LOGGER.debug("Refreshing dashdot config/info failed: %s", err)
                 self._next_static = now + STATIC_RETRY_INTERVAL
 
-        paths = [w for w in SERIES_WIDGETS if w in self.widgets]
+        live = self.live_widgets
         storage_interval = (self.config.get("storage_poll_interval") or 60000) / 1000
+
+        def due(path: str, interval: float) -> bool:
+            # small slack so jitter doesn't push a fetch a whole tick later
+            return now - self._last_fetch.get(path, -1e9) >= interval - 0.5
+
+        paths = [
+            w
+            for w in SERIES_WIDGETS
+            if w in self.widgets and (w in live or due(w, self.sensor_interval))
+        ]
         if "storage" in self.widgets and (
-            self.storage is None or now - self._last_storage > storage_interval
+            self.storage is None or due("storage", storage_interval)
         ):
             paths.append("storage")
 
@@ -215,10 +233,11 @@ class DashdotHub:
             *(self._get(f"load/{p}") for p in paths), return_exceptions=True
         )
 
-        live = self.live
         samples: dict[str, Any] = {}
-        failed: set[str] = set()
+        # endpoints not fetched this time keep their previous state
+        failed = self.failed - set(paths)
         for path, value in zip(paths, results, strict=True):
+            self._last_fetch[path] = now
             if isinstance(value, Exception):
                 failed.add(path)
                 if path not in self.failed:
@@ -226,7 +245,6 @@ class DashdotHub:
                 continue
             if path == "storage":
                 self.storage = value
-                self._last_storage = now
                 update["storage"] = value
                 continue
             if path == "ram" and isinstance(value, dict):
@@ -237,21 +255,18 @@ class DashdotHub:
             self.latest[path] = value
             # graphs only get the fast samples, slow idle polls would
             # squash minutes into a graph that is meant to cover seconds
-            if live:
+            if path in live:
                 self.history[path].append(value)
                 samples[path] = value
 
-        # storage is only fetched now and then, keep its last result
-        if "storage" not in paths and "storage" in self.failed:
-            failed.add("storage")
         failed_changed = failed != self.failed
         self.failed = failed
-        self.available = not paths or len(failed) < len(paths)
+        # only "lost" when every endpoint is failing, not just one of them
+        endpoints = set(self._last_fetch)
+        self.available = not endpoints or bool(endpoints - failed)
 
         if was_available and not self.available:
-            _LOGGER.warning(
-                "Lost connection to dashdot at %s: %s", self.base_url, results[0]
-            )
+            _LOGGER.warning("Lost connection to dashdot at %s", self.base_url)
         elif not was_available and self.available and had_data:
             _LOGGER.info("Reconnected to dashdot at %s", self.base_url)
         if self.available != was_available:
@@ -280,38 +295,68 @@ class DashdotHub:
             "boot_time": self.boot_time,
         }
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, widgets: frozenset[str] | None = None) -> dict[str, Any]:
         """Everything a freshly opened card needs to draw itself."""
         return {
             "static": self.static_payload(),
             "available": self.available,
-            "history": {k: list(v) for k, v in self.history.items()},
-            "storage": self.storage,
+            "history": {
+                k: list(v)
+                for k, v in self.history.items()
+                if widgets is None or k in widgets
+            },
+            "storage": self.storage
+            if widgets is None or "storage" in widgets
+            else None,
             "live_interval": self.live_interval,
         }
 
     @callback
-    def subscribe(self, listener: Callable[[dict[str, Any]], None]) -> CALLBACK_TYPE:
-        """Receive live updates. Returns an unsubscribe callback."""
-        if not self._subscribers:
-            # Coming out of slow polling: whatever is in the history is from
-            # an earlier session, start the graphs fresh and poll right away.
-            for series in self.history.values():
-                series.clear()
+    def subscribe(
+        self,
+        listener: Callable[[dict[str, Any]], None],
+        widgets: frozenset[str] | None = None,
+    ) -> CALLBACK_TYPE:
+        """Receive live updates for `widgets` (None = all).
+
+        Returns an unsubscribe callback.
+        """
+        before = self.live_widgets
+        self._subscribers[listener] = widgets
+        started = self.live_widgets - before
+        if started:
+            # These were polled slowly until now, so their history is stale
+            # or from an earlier session. Start fresh and poll right away.
+            for widget in started:
+                self.history[widget].clear()
             self._wake.set()
-        self._subscribers.add(listener)
 
         @callback
         def unsubscribe() -> None:
-            self._subscribers.discard(listener)
+            self._subscribers.pop(listener, None)
 
         return unsubscribe
 
     def _broadcast(self, update: dict[str, Any]) -> None:
         if not update:
             return
-        for listener in list(self._subscribers):
-            listener(update)
+        for listener, widgets in list(self._subscribers.items()):
+            if widgets is None:
+                listener(update)
+                continue
+            # only send a card the data it shows
+            filtered = {
+                k: v for k, v in update.items() if k not in ("samples", "storage")
+            }
+            samples = {
+                k: v for k, v in update.get("samples", {}).items() if k in widgets
+            }
+            if samples:
+                filtered["samples"] = samples
+            if "storage" in update and "storage" in widgets:
+                filtered["storage"] = update["storage"]
+            if filtered:
+                listener(filtered)
 
     # ---- Sensor entities ----------------------------------------------------
 

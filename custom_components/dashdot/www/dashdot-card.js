@@ -32,7 +32,7 @@
  *   query: graph=cpu&multiView=true&gap=1
  */
 
-const CARD_VERSION = '1.2.0';
+const CARD_VERSION = '1.3.0';
 
 const PALETTES = {
   light: {
@@ -95,6 +95,13 @@ const toColor = (value, name) => {
 };
 
 const toBool = (value) => value === true || value === 'true';
+
+/** What a card subscribes to: its instance and the widgets it shows (null = all) */
+const subscription = (config) => {
+  const graph = config.graph ? String(config.graph).toLowerCase() : null;
+  return { instance: config.instance ?? null, widgets: graph ? [graph] : (config.widgets ?? null) };
+};
+const subscriptionKey = (config) => JSON.stringify(subscription(config));
 
 /** Merge `query` (an iframe query string or URL) into the config and resolve aliases */
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -1106,7 +1113,8 @@ class DashdotCard extends HTMLElement {
       : {};
     const height = graph ? toSize(config.height, 'height') : undefined;
 
-    const instanceChanged = this.config && this.config.instance !== config.instance;
+    // the integration only polls fast / sends what the card shows
+    const subscriptionChanged = this.config && subscriptionKey(this.config) !== subscriptionKey(config);
     this.config = config;
     this.graph = graph;
     this.overrides = { color, surface };
@@ -1118,7 +1126,7 @@ class DashdotCard extends HTMLElement {
     } else {
       this.style.setProperty('--dd-height', `${Number(config.height) || 360}px`);
     }
-    if (instanceChanged) this.resubscribe();
+    if (subscriptionChanged) this.resubscribe();
     else this.subscribe();
     this.rebuild();
   }
@@ -1201,11 +1209,13 @@ class DashdotCard extends HTMLElement {
     if (this.unsub || this.subscribing || !this._hass || !this.config || !this.isConnected) return;
     this.subscribing = true;
     clearTimeout(this.retry);
-    const instance = this.config.instance;
+    const { instance, widgets } = subscription(this.config);
+    const key = subscriptionKey(this.config);
     const msg = { type: 'dashdot/subscribe' };
     if (instance) msg.instance = instance;
-    // the instance can change in the editor while this is still connecting
-    const current = () => this.config?.instance === instance;
+    if (widgets) msg.widgets = widgets;
+    // instance / widgets can change in the editor while this is still connecting
+    const current = () => !!this.config && subscriptionKey(this.config) === key;
     let stale = false;
     try {
       this.unsub = await this._hass.connection.subscribeMessage((m) => {

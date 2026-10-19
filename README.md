@@ -39,6 +39,9 @@ restart Home Assistant.
 type: custom:dashdot-card
 ```
 
+To change the URL later (e.g. dashdot's host got a new IP), use **⋮ →
+Reconfigure** on the integration. Entities and their history are kept.
+
 The integration serves and registers the card itself, so there is no
 dashboard resource to add and no separate HACS "Dashboard" download. After an
 update, refresh the browser (or clear the companion app's frontend cache) to
@@ -142,9 +145,12 @@ recorder. Sensors only write a new state every *sensor interval* (30 s
 default). The graph refresh rate is the *live interval* (1 s default, like
 dashdot). Change both under **Configure** on the integration.
 
-Home Assistant only polls dashdot at the live interval while a card is open
-somewhere. Otherwise it polls at the sensor interval. When a card opens, its
-graphs start fresh and fill up within a few seconds.
+Home Assistant only polls an endpoint at the live interval while an open card
+shows it. Everything else is polled at the sensor interval. For example, a
+dashboard with just a RAM graph means one request per second, and nothing is
+fast-polled when no card is open. All open cards share the same polling, and
+each card only receives the data it shows. When a graph opens, it starts fresh
+and fills up within a few seconds.
 
 If you change `DASHDOT_WIDGET_LIST`, `DASHDOT_ENABLE_CPU_TEMPS`, or the
 GPUs/drives dashdot sees, the integration reloads itself to add or remove
