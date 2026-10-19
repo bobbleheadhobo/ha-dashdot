@@ -174,4 +174,5 @@ sensors that use it become unavailable.
 ## Credits
 
 The card's design is ported from [dashdot](https://github.com/MauriceNino/dashdot)
-by Maurice el-Banna (MIT). This project is not affiliated with dashdot.
+by Maurice el-Banna (MIT, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+This project is not affiliated with dashdot.
