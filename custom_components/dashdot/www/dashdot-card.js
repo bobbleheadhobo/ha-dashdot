@@ -32,7 +32,7 @@
  *   query: graph=cpu&multiView=true&gap=1
  */
 
-const CARD_VERSION = '1.4.0';
+const CARD_VERSION = '1.0.0';
 
 const PALETTES = {
   light: {

@@ -3,6 +3,12 @@
 A Home Assistant custom integration plus a Lovelace card that redraws the
 dashdot widgets natively inside Home Assistant, without an iframe.
 
+![The full dash. card in Home Assistant](https://raw.githubusercontent.com/bobbleheadhobo/ha-dashdot/main/images/widgets.png)
+
+Or single graphs, like dashdot's iframe widgets:
+
+![Single graph cards: CPU cores, memory, CPU, GPU load](https://raw.githubusercontent.com/bobbleheadhobo/ha-dashdot/main/images/graphs.png)
+
 ```
 browser ──(HA login, HA websocket)──▶ Home Assistant ──(LAN, server-side)──▶ dashdot
 ```
