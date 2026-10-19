@@ -142,6 +142,18 @@ recorder. Sensors only write a new state every *sensor interval* (30 s
 default). The graph refresh rate is the *live interval* (1 s default, like
 dashdot). Change both under **Configure** on the integration.
 
+Home Assistant only polls dashdot at the live interval while a card is open
+somewhere. Otherwise it polls at the sensor interval. When a card opens, its
+graphs start fresh and fill up within a few seconds.
+
+If you change `DASHDOT_WIDGET_LIST`, `DASHDOT_ENABLE_CPU_TEMPS`, or the
+GPUs/drives dashdot sees, the integration reloads itself to add or remove
+sensors. dashdot's config is re-read every 10 minutes, so this can take up
+to 10 minutes. Reload the integration to apply it right away.
+
+If one of dashdot's endpoints fails (for example the GPU read), only the
+sensors that use it become unavailable.
+
 ## Security notes
 
 * dashdot's API has no authentication. Keep it off the internet: remove any

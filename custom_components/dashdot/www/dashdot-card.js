@@ -32,7 +32,7 @@
  *   query: graph=cpu&multiView=true&gap=1
  */
 
-const CARD_VERSION = '1.1.0';
+const CARD_VERSION = '1.2.0';
 
 const PALETTES = {
   light: {
@@ -1201,20 +1201,35 @@ class DashdotCard extends HTMLElement {
     if (this.unsub || this.subscribing || !this._hass || !this.config || !this.isConnected) return;
     this.subscribing = true;
     clearTimeout(this.retry);
+    const instance = this.config.instance;
     const msg = { type: 'dashdot/subscribe' };
-    if (this.config?.instance) msg.instance = this.config.instance;
+    if (instance) msg.instance = instance;
+    // the instance can change in the editor while this is still connecting
+    const current = () => this.config?.instance === instance;
+    let stale = false;
     try {
-      this.unsub = await this._hass.connection.subscribeMessage((m) => this.onMessage(m), msg);
+      this.unsub = await this._hass.connection.subscribeMessage((m) => {
+        if (current()) this.onMessage(m);
+      }, msg);
       this.error = null;
       // The element might have been removed while we were waiting
-      if (!this.isConnected) this.unsubscribe();
+      stale = !this.isConnected || !current();
+      if (stale) this.unsubscribe();
     } catch (err) {
-      this.error = err?.message ?? String(err);
-      this.dd = null;
-      this.rebuild();
-      this.retry = setTimeout(() => this.subscribe(), 10000);
+      if (current()) {
+        this.error = err?.message ?? String(err);
+        this.dd = null;
+        this.rebuild();
+        this.retry = setTimeout(() => this.subscribe(), 10000);
+      } else {
+        stale = true;
+      }
     } finally {
       this.subscribing = false;
+    }
+    if (stale && this.isConnected) {
+      this.dd = null;
+      this.subscribe();
     }
   }
 

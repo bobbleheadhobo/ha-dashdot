@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable
-from datetime import timedelta
+import contextlib
 import logging
 import time
 from typing import Any
@@ -18,13 +18,15 @@ import aiohttp
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_time_interval
 
 from .const import STATIC_REFRESH_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+# Retry a failed periodic config/info refresh after this many seconds
+STATIC_RETRY_INTERVAL = 60
 
 # Widgets with a time series graph, and the dashdot config key that holds
 # how many datapoints the original UI keeps for them.
@@ -58,7 +60,11 @@ async def async_fetch_json(
 
 
 class DashdotHub:
-    """Polls one dashdot instance."""
+    """Polls one dashdot instance.
+
+    Polls every `live_interval` while at least one card is subscribed and
+    every `sensor_interval` otherwise, since only the cards need fast data.
+    """
 
     def __init__(
         self,
@@ -82,18 +88,44 @@ class DashdotHub:
         self.latest: dict[str, Any] = {}
         self.storage: list[float] | None = None
         self.available = False
+        # /load endpoints that failed on the last poll
+        self.failed: set[str] = set()
+
+        # Called when dashdot's widgets or hardware change in a way that
+        # changes which sensors should exist
+        self.on_layout_change: CALLBACK_TYPE | None = None
 
         self._subscribers: set[Callable[[dict[str, Any]], None]] = set()
         self._sensor_listeners: set[CALLBACK_TYPE] = set()
-        self._unsubs: list[CALLBACK_TYPE] = []
-        self._polling = False
-        self._last_static = 0.0
+        self._task: asyncio.Task | None = None
+        self._wake = asyncio.Event()
+        self._layout: tuple | None = None
+        self._next_static = 0.0
         self._last_storage = 0.0
+        self._last_sensor_write = 0.0
 
     @property
     def widgets(self) -> list[str]:
         """Widgets enabled in dashdot (DASHDOT_WIDGET_LIST)."""
         return self.config.get("widget_list", [])
+
+    @property
+    def live(self) -> bool:
+        """Whether a card is watching, so we poll at the fast rate."""
+        return bool(self._subscribers)
+
+    def widget_ok(self, widget: str) -> bool:
+        """Whether the last fetch of this widget's data worked."""
+        return self.available and widget not in self.failed
+
+    def _layout_key(self) -> tuple:
+        """Everything that decides which sensor entities exist."""
+        return (
+            tuple(sorted(self.widgets)),
+            bool(self.config.get("enable_cpu_temps")),
+            len((self.info.get("gpu") or {}).get("layout") or []),
+            len(self.info.get("storage") or []),
+        )
 
     async def _get(self, path: str) -> Any:
         return await async_fetch_json(
@@ -107,7 +139,7 @@ class DashdotHub:
         self.info = info
         uptime = (info.get("os") or {}).get("uptime")
         self.boot_time = time.time() - uptime if uptime else None
-        self._last_static = time.monotonic()
+        self._next_static = time.monotonic() + STATIC_REFRESH_INTERVAL
 
         for widget, key in SERIES_WIDGETS.items():
             size = int(self.config.get(key) or 20)
@@ -115,86 +147,83 @@ class DashdotHub:
             if old is None or old.maxlen != size:
                 self.history[widget] = deque(old or (), maxlen=size)
 
+        layout = self._layout_key()
+        if self._layout is not None and layout != self._layout:
+            _LOGGER.info(
+                "dashdot's widgets or hardware changed, reloading to update sensors"
+            )
+            if self.on_layout_change:
+                self.on_layout_change()
+        self._layout = layout
+
     async def async_start(self) -> None:
         """Do the first fetch and start polling."""
         await self.async_refresh_static()
         await self._async_poll()
-        self._unsubs.append(
-            async_track_time_interval(
-                self.hass,
-                self._async_poll_interval,
-                timedelta(seconds=self.live_interval),
-                name="dashdot live poll",
-            )
-        )
-        self._unsubs.append(
-            async_track_time_interval(
-                self.hass,
-                self._notify_sensors,
-                timedelta(seconds=self.sensor_interval),
-                name="dashdot sensor update",
-            )
+        self._task = self.hass.async_create_background_task(
+            self._async_run(), name=f"dashdot poll {self.base_url}"
         )
 
     @callback
     def async_stop(self) -> None:
         """Stop polling and tell open cards to resubscribe."""
-        for unsub in self._unsubs:
-            unsub()
-        self._unsubs.clear()
+        if self._task:
+            self._task.cancel()
+            self._task = None
         self._broadcast({"reload": True})
         self._subscribers.clear()
 
-    async def _async_poll_interval(self, _now: Any) -> None:
-        await self._async_poll()
+    async def _async_run(self) -> None:
+        while True:
+            self._wake.clear()
+            started = time.monotonic()
+            try:
+                await self._async_poll()
+            except Exception:
+                _LOGGER.exception("Unexpected error polling dashdot")
+            interval = self.live_interval if self.live else self.sensor_interval
+            delay = max(0.0, interval - (time.monotonic() - started))
+            # A card subscribing sets _wake, so it gets data right away
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(delay):
+                    await self._wake.wait()
 
     async def _async_poll(self) -> None:
-        # Skip a tick rather than piling up requests if dashdot is slow.
-        if self._polling:
-            return
-        self._polling = True
-        try:
-            await self._async_poll_inner()
-        finally:
-            self._polling = False
-
-    async def _async_poll_inner(self) -> None:
         now = time.monotonic()
         update: dict[str, Any] = {}
+        was_available = self.available
+        had_data = bool(self.latest)
 
-        try:
-            if now - self._last_static > STATIC_REFRESH_INTERVAL:
+        if now >= self._next_static:
+            try:
                 await self.async_refresh_static()
                 update["static"] = self.static_payload()
+            except DashdotError as err:
+                # keep the old info, it rarely changes
+                _LOGGER.debug("Refreshing dashdot config/info failed: %s", err)
+                self._next_static = now + STATIC_RETRY_INTERVAL
 
-            paths = [w for w in SERIES_WIDGETS if w in self.widgets]
-            storage_interval = (
-                self.config.get("storage_poll_interval") or 60000
-            ) / 1000
-            fetch_storage = "storage" in self.widgets and (
-                self.storage is None or now - self._last_storage > storage_interval
-            )
-            if fetch_storage:
-                paths.append("storage")
+        paths = [w for w in SERIES_WIDGETS if w in self.widgets]
+        storage_interval = (self.config.get("storage_poll_interval") or 60000) / 1000
+        if "storage" in self.widgets and (
+            self.storage is None or now - self._last_storage > storage_interval
+        ):
+            paths.append("storage")
 
-            results = await asyncio.gather(*(self._get(f"load/{p}") for p in paths))
-        except DashdotError as err:
-            if self.available:
-                _LOGGER.warning("Lost connection to dashdot: %s", err)
-                self.available = False
-                self._broadcast({"available": False})
-                self._notify_sensors()
-            return
+        # Each endpoint on its own, so one failing doesn't take the rest down
+        results = await asyncio.gather(
+            *(self._get(f"load/{p}") for p in paths), return_exceptions=True
+        )
 
-        if not self.available:
-            if self.latest:
-                _LOGGER.info("Reconnected to dashdot at %s", self.base_url)
-            self.available = True
-            update["available"] = True
-            self._notify_sensors()
-
+        live = self.live
         samples: dict[str, Any] = {}
+        failed: set[str] = set()
         for path, value in zip(paths, results, strict=True):
+            if isinstance(value, Exception):
+                failed.add(path)
+                if path not in self.failed:
+                    _LOGGER.debug("dashdot load/%s failed: %s", path, value)
+                continue
             if path == "storage":
                 self.storage = value
                 self._last_storage = now
@@ -206,12 +235,40 @@ class DashdotHub:
             if value is None:
                 continue
             self.latest[path] = value
-            self.history[path].append(value)
-            samples[path] = value
+            # graphs only get the fast samples, slow idle polls would
+            # squash minutes into a graph that is meant to cover seconds
+            if live:
+                self.history[path].append(value)
+                samples[path] = value
+
+        # storage is only fetched now and then, keep its last result
+        if "storage" not in paths and "storage" in self.failed:
+            failed.add("storage")
+        failed_changed = failed != self.failed
+        self.failed = failed
+        self.available = not paths or len(failed) < len(paths)
+
+        if was_available and not self.available:
+            _LOGGER.warning(
+                "Lost connection to dashdot at %s: %s", self.base_url, results[0]
+            )
+        elif not was_available and self.available and had_data:
+            _LOGGER.info("Reconnected to dashdot at %s", self.base_url)
+        if self.available != was_available:
+            update["available"] = self.available
 
         if samples:
             update["samples"] = samples
         self._broadcast(update)
+
+        # sensors write at sensor_interval, or right away when availability flips
+        if (
+            self.available != was_available
+            or failed_changed
+            or now - self._last_sensor_write >= self.sensor_interval - 0.5
+        ):
+            self._last_sensor_write = now
+            self._notify_sensors()
 
     # ---- Card subscriptions -------------------------------------------------
 
@@ -236,6 +293,12 @@ class DashdotHub:
     @callback
     def subscribe(self, listener: Callable[[dict[str, Any]], None]) -> CALLBACK_TYPE:
         """Receive live updates. Returns an unsubscribe callback."""
+        if not self._subscribers:
+            # Coming out of slow polling: whatever is in the history is from
+            # an earlier session, start the graphs fresh and poll right away.
+            for series in self.history.values():
+                series.clear()
+            self._wake.set()
         self._subscribers.add(listener)
 
         @callback
@@ -264,6 +327,6 @@ class DashdotHub:
         return remove
 
     @callback
-    def _notify_sensors(self, _now: Any = None) -> None:
+    def _notify_sensors(self) -> None:
         for listener in list(self._sensor_listeners):
             listener()

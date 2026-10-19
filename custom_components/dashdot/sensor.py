@@ -269,6 +269,10 @@ class DashdotSensor(SensorEntity):
 
     @property
     def available(self) -> bool:
+        # key prefix is the dashdot endpoint the value comes from
+        widget = self.entity_description.key.split("_")[0]
+        if widget in ("cpu", "ram", "gpu", "network", "storage"):
+            return self.hub.widget_ok(widget)
         return self.hub.available
 
     @property
